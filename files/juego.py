@@ -433,12 +433,11 @@ def main():
         print("ERROR:", e)
         return
     if args.puerto:
-        if not robot.confirmar_encendido():
+        if not robot.confirmar_encendido("de RETIRADA (donde lo dejaste, fuera del encuadre de la camara)"):
             return
         try:
-            brazo.activar()
-            print("Retirando el brazo fuera del encuadre de la camara...")
-            brazo.retirar()
+            brazo.activar(desde=robot.pose_retirada())
+            print("Brazo activado en la pose de retirada.")
         except (RuntimeError, TimeoutError) as e:
             print("ERROR:", e)
             return
