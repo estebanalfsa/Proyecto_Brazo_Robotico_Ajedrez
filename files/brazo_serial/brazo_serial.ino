@@ -36,12 +36,13 @@ bool enMovimiento = false;
 char buf[40];
 byte nbuf = 0;
 
-void activar() {
+void activar(const int* p) {
   if (activo) { Serial.println(F("OK")); return; }
   for (byte i = 0; i < NUM; i++) {
-    pos[i] = ini[i];
-    tgt[i] = ini[i];
-    servos[i].write(ini[i]);     // write ANTES de attach: sin salto
+    int a = constrain(p[i], mn[i], mx[i]);
+    pos[i] = a;
+    tgt[i] = a;
+    servos[i].write(a);          // write ANTES de attach: sin salto
     servos[i].attach(pines[i]);
     delay(600);                  // uno por uno: evita picos de corriente
   }
@@ -77,8 +78,10 @@ void imprimirLim(char clave, const int* v) {
 void comando(char* s) {
   char c = toupper(s[0]);
   if (c == 'A') {
-    activar();
-  } else if (c == 'G') {
+    int v[NUM];
+    int n = sscanf(s + 1, "%d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+    activar(n == NUM ? v : ini);   // "A" solo = reposo; "A b h c m g p" = esa pose
+  } else if (c == 'G'){
     if (!activo) { Serial.println(F("ERR no activo")); return; }
     int v[NUM];
     int n = sscanf(s + 1, "%d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);

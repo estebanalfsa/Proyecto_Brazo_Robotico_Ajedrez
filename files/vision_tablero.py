@@ -55,6 +55,7 @@ FRACCION_OCUPADA = 0.20        # fraccion de pixeles cambiados => hay pieza
 CANNY_BAJO, CANNY_ALTO = 20, 60   # sensibilidad de bordes (piezas de poco contraste)
 FRACCION_BORDES = 0.03         # fraccion de bordes NUEVOS => hay pieza (piezas del mismo tono que la casilla)
 FRAMES_ESTABLES = 6            # frames seguidos iguales para aceptar un cambio
+FRAMES_RESYNC = 45             # frames seguidos con la MISMA lectura "rara" => es el estado real, no una mano
 GRIS_PIEZA_BLANCA = 120        # brillo medio de la pieza para llamarla blanca
 VERIF_ESPERA_S = 2.5           # espera antes de verificar con la camara tras mover
 MAX_CAMBIOS = 6                # si cambian mas casillas DE GOLPE es un brazo o una mano tapando: se ignora
@@ -130,6 +131,13 @@ def _mascara_borde():
         _MASCARA_BORDE = mask
     return _MASCARA_BORDE
 
+def equipo(zona_bgr):
+    """'R' = tablita verde con sticker rojo, 'N' = sticker negro."""
+    hsv = cv2.cvtColor(zona_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    verde = ((h > 40) & (h < 90) & (s > 70) & (v > 50)).mean()
+    rojo = (((h < 10) | (h > 170)) & (s > 120) & (v > 60)).mean()
+    return "R" if (verde + rojo) > 0.08 else "N"
 
 def analizar(actual, fondo):
     """
@@ -163,9 +171,7 @@ def analizar(actual, fondo):
             fbor[row, col] = (bordes_nuevos[y1:y2, x1:x2] > 0).mean()
             if frac[row, col] > FRACCION_OCUPADA or fbor[row, col] > FRACCION_BORDES:
                 ocup[row, col] = True
-                zona = g1[y1:y2, x1:x2]
-                px = zona[mascara] if mascara.any() else zona.reshape(-1)
-                color[row, col] = "W" if px.mean() > GRIS_PIEZA_BLANCA else "B"
+                color[row, col] = equipo(actual[y1:y2, x1:x2])
     return ocup, color, frac, fbor
 
 
@@ -189,6 +195,8 @@ class Tablero:
         self.raw_color = np.full((8, 8), "", dtype="<U1")
         self.ocluido = False                        # True si algo (brazo, mano) tapa mucho tablero
         self.sin_lectura_inicial = True
+        self._prev_raw = None
+        self._ocl_estable = 0
 
     def reiniciar_ocupacion(self):
         self.estable[:] = False
@@ -246,7 +254,18 @@ class Tablero:
         if cambia.sum() > MAX_CAMBIOS:
             self.cuenta[:] = 0
             self.ocluido = True
+            if self._prev_raw is not None and (ocup == self._prev_raw).all():
+                self._ocl_estable += 1          # la lectura no se mueve: no parece una mano
+            else:
+                self._ocl_estable = 0
+            self._prev_raw = ocup.copy()
+            if self._ocl_estable >= FRAMES_RESYNC:
+                self.aceptar_lectura()
+                self._ocl_estable = 0
+                self.ocluido = False
             return
+        self._ocl_estable = 0
+        self._prev_raw = None
         self.cuenta[cambia] += 1
         self.cuenta[~cambia] = 0
         ok = self.cuenta >= FRAMES_ESTABLES
@@ -307,7 +326,7 @@ def dibujar_tablero(rect, t, origen=None, debug=False):
     for row in range(8):
         for col in range(8):
             if t.estable[row, col]:
-                c = VERDE if t.color[row, col] == "W" else NARANJA
+                c = VERDE if t.color[row, col] == "R" else NARANJA
                 cv2.rectangle(capa, (col * STEP + 3, row * STEP + 3),
                               ((col + 1) * STEP - 3, (row + 1) * STEP - 3), c, -1)
     out = cv2.addWeighted(capa, 0.35, out, 0.65, 0)
