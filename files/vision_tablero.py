@@ -466,7 +466,7 @@ class App:
                 self.brazo.mover_pieza(origen, destino,
                                        progreso=lambda s: self.msg(f"{origen}->{destino}: {s}", VERDE, 60))
                 self.brazo.ocupado = True                # sigue congelado mientras se actualiza el estado
-                self.t.aplicar_movimiento(origen, destino)
+                # El estado NO se adelanta a mano: lo actualiza la camara en Tablero.procesar.
                 self.libre_desde = time.time() + DESCANSO_S
                 self.msg(f"Listo {origen} -> {destino}. Verificando con la camara...", VERDE, 10)
                 self.verificar = (time.time() + VERIF_ESPERA_S, origen, destino)
