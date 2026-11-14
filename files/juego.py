@@ -23,7 +23,9 @@ mientras la camara no se mueva (si se mueve: R y recalibrar).
 
 En la ventana del juego: clic en una casilla = ORIGEN, otro clic = DESTINO, boton JUGAR (o tecla J).
 Al elegir el origen se marcan con un punto verde las casillas legales (python-chess).
-Teclas: J jugar | L limpiar | X PARADA | U releer el tablero | D diagnostico | Q salir
+Si el clasificador esta entrenado, sobre cada pieza de tu lado aparece su tipo: verde si coincide
+con lo esperado en la posicion inicial, rojo si no.
+Teclas: J jugar | L limpiar | P entrenar clasificador | X PARADA | U releer | D diagnostico | Q salir
 
 Reglas activas: solo tu lado (filas 1 y 2), sin capturas, sin enroque y sin promocion.
 El tablero logico arranca en la posicion inicial y se actualiza cuando la camara confirma
@@ -44,6 +46,7 @@ except ImportError:
 
 import robot
 import vision_tablero as V
+import clasificador
 
 if not hasattr(robot.Brazo, "retirar"):
     raise SystemExit("Actualiza robot.py: falta la pose de retirada (Brazo.retirar).")
@@ -64,6 +67,8 @@ class Juego(V.App):
         self.destinos = set()
         self.logico = chess.Board()        # posicion inicial; solo se mueve tu lado
         self.mi_color = chess.WHITE        # tu lado son las filas 1 y 2
+        self.clf = clasificador.Clasificador()
+        self.tipos = {}
         x0, x1 = V.BOARD_PIXELS + 20, V.BOARD_PIXELS + PANEL_W - 20
         mitad = (x0 + x1) // 2
         self.botones = [
@@ -137,6 +142,47 @@ class Juego(V.App):
         super().revisar_verificacion()
         if v and time.time() >= v[0] and self.t.ocupada(v[2]) and not self.t.ocupada(v[1]):
             self.registrar_jugada(v[1], v[2])          # la camara confirmo: se anota la jugada
+
+    # ---------------- reconocimiento ----------------
+    def equipo_propio(self):
+        """'R' o 'N' segun la mayoria de las piezas vistas en las filas 1 y 2."""
+        vals = [x for x in self.t.color[6:8, :].flatten() if x]
+        return max(set(vals), key=vals.count) if vals else None
+
+    def procesar(self, rect):
+        super().procesar(rect)
+        self.tipos = {}
+        eq = self.equipo_propio()
+        if eq is None or not self.clf.listo():
+            return
+        for row in range(8):
+            for col in range(8):
+                if self.t.estable[row, col] and self.t.color[row, col] == eq:
+                    tipo, conf = self.clf.predecir(clasificador.recorte(rect, col, row, V.STEP))
+                    if tipo:
+                        self.tipos[V.nombre_casilla(col, row)] = (tipo, conf)
+
+    def entrenar(self, rect):
+        """Entrena con las 16 piezas en la posicion inicial (filas 1 y 2)."""
+        eq = self.equipo_propio()
+        if eq is None:
+            self.msg("No detecto piezas de tu lado (filas 1-2). Revisa con D.", V.ROJO, 8)
+            return
+        muestras = []
+        for fila in (1, 2):
+            for col in "ABCDEFGH":
+                n = f"{col}{fila}"
+                c, r = V.indices(n)
+                if self.t.ocupada(n) and self.t.color[r, c] == eq:
+                    muestras.append((clasificador.recorte(rect, c, r, V.STEP),
+                                     clasificador.tipo_inicial(n)))
+        if len(muestras) != 16:
+            self.msg(f"Hay {len(muestras)} piezas de tu equipo en filas 1-2 (deben ser 16). "
+                     "No se entreno.", V.ROJO, 8)
+            return
+        self.clf.agregar_lote(muestras)
+        self.msg("Entrenado con la posicion inicial (16 piezas). Mueve un poco las tablitas y repite P.",
+                 V.VERDE, 8)
 
     # ---------------- comprobaciones ----------------
     def estado_jugada(self):
@@ -238,6 +284,12 @@ class Juego(V.App):
             if c == "l":
                 self.limpiar()
                 return True
+            if c == "p":
+                if self.t.H is None:
+                    self.msg("Falta calibrar el tablero (C)", V.ROJO, 6)
+                else:
+                    self.entrenar(self.t.rectificar(frame))
+                return True
         return super().teclado(key, frame)
 
     # ---------------- dibujo ----------------
@@ -266,6 +318,12 @@ class Juego(V.App):
             for nombre in self.destinos:                   # casillas legales: punto verde
                 c, r = V.indices(nombre)
                 cv2.circle(tab, (c * V.STEP + V.STEP // 2, r * V.STEP + V.STEP // 2), 9, V.VERDE, -1)
+            for nombre, (tipo, conf) in self.tipos.items():
+                c, r = V.indices(nombre)
+                esperada = self.logico.piece_at(chess.parse_square(nombre.lower()))
+                coincide = esperada is not None and esperada.symbol().upper() == tipo
+                V.texto(tab, tipo, (c * V.STEP + 6, r * V.STEP + 24), 0.6,
+                        V.VERDE if coincide else V.ROJO, 2)
             if self.congelado():
                 V.texto(tab, "ROBOT MOVIENDO - lectura congelada", (V.BOARD_PIXELS // 2 - 160, 20), 0.6, V.ROJO, 2)
             elif t.ocluido:
@@ -283,6 +341,12 @@ class Juego(V.App):
         for linea in textwrap.wrap(texto, 34)[:3]:
             V.texto(panel, linea, (x0, y), 0.55, color, 1)
             y += 24
+        if self.sel_o in self.tipos:
+            tipo, conf = self.tipos[self.sel_o]
+            V.texto(panel, f"Pieza vista: {clasificador.NOMBRES[tipo]} ({conf:.0%})",
+                    (x0, 316), 0.5, V.CIAN, 1)
+        elif not self.clf.listo():
+            V.texto(panel, "Clasificador sin entrenar (P)", (x0, 316), 0.5, V.NARANJA, 1)
         V.texto(panel, "ROBOT: MOVIENDO" if self.brazo.ocupado else "ROBOT: listo", (x0, 340), 0.5,
                 V.NARANJA if self.brazo.ocupado else V.VERDE, 1)
         if t.H is None or t.fondo_rect is None:
