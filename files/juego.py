@@ -155,7 +155,8 @@ class Juego(V.App):
     # ---------------- reconocimiento ----------------
     def equipo_propio(self):
         """'R' o 'N' segun la mayoria de las piezas vistas en las filas 1 y 2."""
-        vals = [x for x in self.t.color[6:8, :].flatten() if x]
+        vals = [self.t.color[r, c] for r in (6, 7) for c in range(8)
+                if self.t.estable[r, c] and self.t.color[r, c]]
         return max(set(vals), key=vals.count) if vals else None
 
     def procesar(self, rect):

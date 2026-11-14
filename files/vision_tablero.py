@@ -56,6 +56,7 @@ CANNY_BAJO, CANNY_ALTO = 20, 60   # sensibilidad de bordes (piezas de poco contr
 FRACCION_BORDES = 0.03         # fraccion de bordes NUEVOS => hay pieza (piezas del mismo tono que la casilla)
 FRAMES_ESTABLES = 6            # frames seguidos iguales para aceptar un cambio
 FRAMES_RESYNC = 45             # frames con la MISMA lectura rara => es real, no una mano
+FRAMES_COLOR = 10              # lecturas seguidas con el mismo equipo para cambiar el color
 UMBRAL_EQUIPO = 0.08           # fraccion de pixeles verdes o rojos para llamar "R" a la tablita
 VERIF_ESPERA_S = 2.5           # espera antes de verificar con la camara tras mover
 MAX_CAMBIOS = 6                # si cambian mas casillas DE GOLPE es un brazo o una mano tapando: se ignora
@@ -134,13 +135,16 @@ def _mascara_borde():
     return _MASCARA_BORDE
 
 
-def equipo(zona_bgr):
-    """Equipo de la tablita por color: 'R' = verde con sticker rojo, 'N' = sticker negro."""
+def equipo(zona_bgr, mascara=None):
+    """Equipo de la tablita por color: 'R' = verde con sticker rojo, 'N' = sticker negro.
+    Si se pasa mascara, solo cuenta los pixeles de la pieza, no el fondo de la casilla."""
     hsv = cv2.cvtColor(zona_bgr, cv2.COLOR_BGR2HSV)
     h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    verde = ((h > 40) & (h < 90) & (s > 70) & (v > 50)).mean()
-    rojo = (((h < 10) | (h > 170)) & (s > 120) & (v > 60)).mean()
-    return "R" if (verde + rojo) > UMBRAL_EQUIPO else "N"
+    verde = (h > 40) & (h < 90) & (s > 70) & (v > 50)
+    rojo = ((h < 10) | (h > 170)) & (s > 120) & (v > 60)
+    if mascara is not None and mascara.any():
+        verde, rojo = verde[mascara], rojo[mascara]
+    return "R" if (verde.mean() + rojo.mean()) > UMBRAL_EQUIPO else "N"
 
 
 def analizar(actual, fondo):
@@ -175,7 +179,7 @@ def analizar(actual, fondo):
             fbor[row, col] = (bordes_nuevos[y1:y2, x1:x2] > 0).mean()
             if frac[row, col] > FRACCION_OCUPADA or fbor[row, col] > FRACCION_BORDES:
                 ocup[row, col] = True
-                color[row, col] = equipo(actual[y1:y2, x1:x2])
+                color[row, col] = equipo(actual[y1:y2, x1:x2], mascara)
     return ocup, color, frac, fbor
 
 
@@ -201,6 +205,8 @@ class Tablero:
         self.sin_lectura_inicial = True
         self._prev_raw = None
         self._ocl_estable = 0
+        self._color_cand = np.full((8, 8), "", dtype="<U1")
+        self._color_cuenta = np.zeros((8, 8), int)
 
     def reiniciar_ocupacion(self):
         self.estable[:] = False
@@ -209,6 +215,8 @@ class Tablero:
         self.sin_lectura_inicial = True             # la primera lectura se acepta tal cual
         self._prev_raw = None
         self._ocl_estable = 0
+        self._color_cand[:] = ""
+        self._color_cuenta[:] = 0
 
     def calibrar(self):
         if len(self.esquinas) != 4:
@@ -278,7 +286,25 @@ class Tablero:
         ok = self.cuenta >= FRAMES_ESTABLES
         self.estable[ok] = ocup[ok]
         self.cuenta[ok] = 0
-        self.color[ocup] = color[ocup]
+        # Equipo con histeresis: solo cambia tras FRAMES_COLOR lecturas seguidas iguales.
+        for r, c in zip(*np.where(self.estable)):
+            nuevo = self.raw_color[r, c]
+            if not nuevo:
+                continue
+            if nuevo == self.color[r, c]:
+                self._color_cuenta[r, c] = 0
+            elif nuevo == self._color_cand[r, c]:
+                self._color_cuenta[r, c] += 1
+            else:
+                self._color_cand[r, c] = nuevo
+                self._color_cuenta[r, c] = 1
+            if self._color_cuenta[r, c] >= FRAMES_COLOR:
+                self.color[r, c] = nuevo
+                self._color_cuenta[r, c] = 0
+        vacias = ~self.estable
+        self.color[vacias] = ""
+        self._color_cand[vacias] = ""
+        self._color_cuenta[vacias] = 0
 
     def aceptar_lectura(self):
         """Toma la ultima lectura de la camara como el estado real (con el brazo en reposo)."""
@@ -287,6 +313,8 @@ class Tablero:
         self.cuenta[:] = 0
         self._prev_raw = None
         self._ocl_estable = 0
+        self._color_cand[:] = self.color
+        self._color_cuenta[:] = 0
 
     def aplicar_movimiento(self, origen, destino):
         """Tras un movimiento del robot: el origen queda libre y el destino ocupado (la camara lo confirmara)."""
