@@ -321,7 +321,9 @@ class Juego(V.App):
                 self.limpiar()
                 return True
             if c == "p":
-                if self.t.H is None:
+                if self.congelado() or self.t.ocluido:
+                    self.msg("Robot moviendose o tablero tapado: espera antes de entrenar", V.NARANJA, 6)
+                elif self.t.H is None:
                     self.msg("Falta calibrar el tablero (C)", V.ROJO, 6)
                 else:
                     self.entrenar(self.t.rectificar(frame))
