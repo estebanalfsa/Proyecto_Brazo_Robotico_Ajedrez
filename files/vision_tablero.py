@@ -60,9 +60,10 @@ VERIF_ESPERA_S = 2.5           # espera antes de verificar con la camara tras mo
 MAX_CAMBIOS = 6                # si cambian mas casillas DE GOLPE es un brazo o una mano tapando: se ignora
 DESCANSO_S = 1.0               # tras moverse el robot se espera antes de volver a leer el tablero
 
-ARCHIVO_CALIB = "calibracion_tablero.json"
-ARCHIVO_FONDO = "fondo_vacio.png"
-ARCHIVO_MAPA = "mapa_casillas.csv"
+DIR_DATOS = os.path.dirname(os.path.abspath(__file__))
+ARCHIVO_CALIB = os.path.join(DIR_DATOS, "calibracion_tablero.json")
+ARCHIVO_FONDO = os.path.join(DIR_DATOS, "fondo_vacio.png")
+ARCHIVO_MAPA = os.path.join(DIR_DATOS, "mapa_casillas.csv")
 
 WINDOW_CAMERA = "Camara - tablero"
 WINDOW_BOARD = "Tablero rectificado"
