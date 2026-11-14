@@ -22,7 +22,12 @@ Primera vez (ventana de la camara): clic en las 4 esquinas, C, O hasta que A1 qu
 mientras la camara no se mueva (si se mueve: R y recalibrar).
 
 En la ventana del juego: clic en una casilla = ORIGEN, otro clic = DESTINO, boton JUGAR (o tecla J).
+Al elegir el origen se marcan con un punto verde las casillas legales (python-chess).
 Teclas: J jugar | L limpiar | X PARADA | U releer el tablero | D diagnostico | Q salir
+
+Reglas activas: solo tu lado (filas 1 y 2), sin capturas, sin enroque y sin promocion.
+El tablero logico arranca en la posicion inicial y se actualiza cuando la camara confirma
+cada movimiento.
 """
 import argparse
 import textwrap
@@ -31,6 +36,11 @@ import time
 
 import cv2
 import numpy as np
+
+try:
+    import chess
+except ImportError:
+    raise SystemExit("Falta python-chess: ejecuta  py -m pip install chess")
 
 import robot
 import vision_tablero as V
@@ -51,6 +61,9 @@ class Juego(V.App):
         super().__init__(brazo)
         self.sel_o = None
         self.sel_d = None
+        self.destinos = set()
+        self.logico = chess.Board()        # posicion inicial; solo se mueve tu lado
+        self.mi_color = chess.WHITE        # tu lado son las filas 1 y 2
         x0, x1 = V.BOARD_PIXELS + 20, V.BOARD_PIXELS + PANEL_W - 20
         mitad = (x0 + x1) // 2
         self.botones = [
@@ -65,8 +78,14 @@ class Juego(V.App):
     def seleccionar(self, nombre):
         if self.sel_o is None or self.sel_d is not None:       # empezar una jugada nueva
             self.sel_o, self.sel_d = nombre, None
+            self.destinos = self.casillas_legales(nombre) or set()
+            if self.destinos:
+                self.msg(f"{nombre}: {len(self.destinos)} destinos legales (puntos verdes)", V.VERDE, 6)
+            else:
+                self.msg(f"{nombre}: sin movimientos legales", V.NARANJA, 6)
         elif nombre == self.sel_o:                             # clic otra vez en el origen: anula
             self.sel_o = None
+            self.destinos = set()
         else:
             self.sel_d = nombre
 
@@ -75,6 +94,49 @@ class Juego(V.App):
 
     def limpiar(self):
         self.sel_o = self.sel_d = None
+        self.destinos = set()
+
+    # ---------------- ajedrez ----------------
+    def casillas_legales(self, nombre):
+        """Casillas a las que puede ir esa pieza tuya, o None si no es una pieza tuya."""
+        sq = chess.parse_square(nombre.lower())
+        pieza = self.logico.piece_at(sq)
+        if pieza is None or pieza.color != self.mi_color:
+            return None
+        self.logico.turn = self.mi_color
+        return {chess.square_name(m.to_square).upper() for m in self.logico.legal_moves
+                if m.from_square == sq and not self.logico.is_capture(m)
+                and not self.logico.is_castling(m) and m.promotion is None}
+
+    def validar(self, origen, destino):
+        ok, texto, conservar = super().validar(origen, destino)
+        if not ok:
+            return ok, texto, conservar
+        legales = self.casillas_legales(origen)
+        if legales is None:
+            return False, f"{origen} no es una pieza de tu lado", False
+        if destino not in legales:
+            posibles = " ".join(sorted(legales)) or "ninguna"
+            return False, f"{origen} no puede ir a {destino}. Posibles: {posibles}", True
+        return True, "", False
+
+    def registrar_jugada(self, origen, destino):
+        a, b = chess.parse_square(origen.lower()), chess.parse_square(destino.lower())
+        self.logico.turn = self.mi_color
+        m = next((m for m in self.logico.legal_moves
+                  if m.from_square == a and m.to_square == b), None)
+        if m:
+            self.logico.push(m)
+            print(f"Jugada registrada: {origen} -> {destino}")
+        else:
+            print(f"AVISO: {origen} -> {destino} no esta en el tablero logico")
+        self.logico.turn = self.mi_color
+
+    def revisar_verificacion(self):
+        v = self.verificar
+        super().revisar_verificacion()
+        if v and time.time() >= v[0] and self.t.ocupada(v[2]) and not self.t.ocupada(v[1]):
+            self.registrar_jugada(v[1], v[2])          # la camara confirmo: se anota la jugada
 
     # ---------------- comprobaciones ----------------
     def estado_jugada(self):
@@ -86,8 +148,13 @@ class Juego(V.App):
         if d is None:
             if t.fondo_rect is not None and not t.ocupada(o):
                 return False, f"En {o} NO hay pieza (segun la camara). Elige otro origen.", V.ROJO, "todo"
+            legales = self.casillas_legales(o)
+            if legales is not None and not legales:
+                return False, f"{o}: esa pieza no tiene movimientos legales.", V.NARANJA, "nada"
+            if legales is None and t.fondo_rect is not None:
+                return False, f"{o}: la camara ve pieza, pero no es una pieza de tu lado.", V.NARANJA, "nada"
             if t.fondo_rect is not None:
-                return False, f"Origen {o} con pieza. Ahora elige la casilla de DESTINO.", V.AMARILLO, "nada"
+                return False, f"Origen {o} con pieza. Elige el DESTINO (puntos verdes).", V.AMARILLO, "nada"
             return False, f"Origen {o}. Ahora elige el DESTINO.", V.AMARILLO, "nada"
         if self.brazo.ocupado:
             return False, "Robot ocupado: espera a que termine el movimiento.", V.NARANJA, "nada"
@@ -102,7 +169,7 @@ class Juego(V.App):
             return False, "Estabilizando la lectura de la camara...", V.AMARILLO, "nada"
         if (t.cuenta > 0).any():
             return False, "Leyendo el tablero, espera un instante...", V.AMARILLO, "nada"
-        return True, f"{o} -> {d}: origen con pieza y destino libre. Listo para JUGAR.", V.VERDE, "nada"
+        return True, f"{o} -> {d}: jugada legal. Listo para JUGAR.", V.VERDE, "nada"
 
     # ---------------- acciones ----------------
     def jugar(self):
@@ -196,6 +263,9 @@ class Juego(V.App):
                     cv2.rectangle(tab, (c * V.STEP + 2, r * V.STEP + 2),
                                   ((c + 1) * V.STEP - 2, (r + 1) * V.STEP - 2), color, 4)
                     V.texto(tab, rotulo, (c * V.STEP + 6, (r + 1) * V.STEP - 8), 0.4, color, 1)
+            for nombre in self.destinos:                   # casillas legales: punto verde
+                c, r = V.indices(nombre)
+                cv2.circle(tab, (c * V.STEP + V.STEP // 2, r * V.STEP + V.STEP // 2), 9, V.VERDE, -1)
             if self.congelado():
                 V.texto(tab, "ROBOT MOVIENDO - lectura congelada", (V.BOARD_PIXELS // 2 - 160, 20), 0.6, V.ROJO, 2)
             elif t.ocluido:
@@ -273,6 +343,9 @@ def main():
     if cap is None:
         print("Error: no se pudo abrir la camara", args.camara, "(prueba:  python juego.py --listar)")
         return
+
+    for _ in range(40):          # deja que la camara ajuste exposicion y balance antes de leer
+        cap.read()
 
     app = Juego(brazo)
     app.libre_desde = time.time() + 1.5               # espera a que el brazo termine de retirarse
