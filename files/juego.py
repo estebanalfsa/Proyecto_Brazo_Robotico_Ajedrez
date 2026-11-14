@@ -26,7 +26,7 @@ Al elegir el origen se marcan con un punto verde las casillas legales (python-ch
 Si el clasificador esta entrenado, sobre cada pieza de tu lado aparece su tipo: verde si coincide
 con lo esperado en la posicion inicial, rojo si no.
 Teclas: J jugar | L limpiar | P entrenar clasificador | H calibrar altura de stickers
-        X PARADA | U releer el tablero | D diagnostico | Q salir
+        V informe de validacion | X PARADA | U releer el tablero | D diagnostico | Q salir
 
 Reglas activas: solo tu lado (filas 1 y 2), sin capturas, sin enroque y sin promocion.
 El tablero logico arranca en la posicion inicial y se actualiza cuando la camara confirma
@@ -202,6 +202,42 @@ class Juego(V.App):
         self.msg("Entrenado con la posicion inicial (16 piezas). Mueve un poco las tablitas y repite P.",
                  V.VERDE, 8)
 
+    def informe_validacion(self, rect):
+        """Compara el tipo predicho con el esperado en la posicion inicial.
+        Es una validacion EN MUESTRA: usa las mismas imagenes del entrenamiento, asi que es optimista."""
+        if not self.clf.listo():
+            self.msg("Clasificador sin entrenar (P)", V.ROJO, 8)
+            return
+        eq = self.equipo_propio()
+        if eq is None:
+            self.msg("No detecto piezas de tu lado (filas 1-2)", V.ROJO, 8)
+            return
+        rc = self.rect_clasif(rect)
+        filas = []
+        for fila in (1, 2):
+            for col in "ABCDEFGH":
+                n = f"{col}{fila}"
+                c, r = V.indices(n)
+                if not (self.t.ocupada(n) and self.t.color[r, c] == eq):
+                    continue
+                esperado = clasificador.tipo_inicial(n)
+                visto, conf = self.clf.predecir(clasificador.recorte(rc, c, r, V.STEP))
+                filas.append((n, esperado, visto, conf, visto == esperado))
+        if not filas:
+            self.msg("No hay piezas de tu equipo en filas 1-2", V.ROJO, 8)
+            return
+        aciertos = sum(ok for *_, ok in filas)
+        print("\nInforme de validacion (en muestra: optimista)")
+        for n, esperado, visto, conf, ok in filas:
+            print(f"  {n}: esperado {esperado}  visto {visto}  conf {conf:4.0%}  "
+                  f"{'OK' if ok else 'FALLA'}")
+        print(f"  Resumen: {aciertos}/{len(filas)}")
+        mal = [(n, e, v) for n, e, v, _, ok in filas if not ok]
+        if mal:
+            print("  Fallos:", ", ".join(f"{n} {e}->{v}" for n, e, v in mal))
+        self.msg(f"Validacion: {aciertos}/{len(filas)} aciertos (detalle en consola)",
+                 V.VERDE if aciertos == len(filas) else V.NARANJA, 15)
+
     # ---------------- comprobaciones ----------------
     def estado_jugada(self):
         """(ok, texto, color, que_limpiar) segun lo que ve la camara AHORA.
@@ -332,6 +368,14 @@ class Juego(V.App):
             if c == "h":
                 self.calib_top = []
                 self.msg("Clic en el CENTRO del sticker de A1, H1, H8 y A8 (en ese orden)", V.AMARILLO, 30)
+                return True
+            if c == "v":
+                if self.congelado() or self.t.ocluido:
+                    self.msg("Robot moviendose o tablero tapado: espera antes de validar", V.NARANJA, 6)
+                elif self.t.H is None:
+                    self.msg("Falta calibrar el tablero (C)", V.ROJO, 6)
+                else:
+                    self.informe_validacion(self.t.rectificar(frame))
                 return True
         return super().teclado(key, frame)
 
