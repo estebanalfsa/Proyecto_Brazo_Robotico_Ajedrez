@@ -25,13 +25,16 @@ En la ventana del juego: clic en una casilla = ORIGEN, otro clic = DESTINO, boto
 Al elegir el origen se marcan con un punto verde las casillas legales (python-chess).
 Si el clasificador esta entrenado, sobre cada pieza de tu lado aparece su tipo: verde si coincide
 con lo esperado en la posicion inicial, rojo si no.
-Teclas: J jugar | L limpiar | P entrenar clasificador | X PARADA | U releer | D diagnostico | Q salir
+Teclas: J jugar | L limpiar | P entrenar clasificador | H calibrar altura de stickers
+        X PARADA | U releer el tablero | D diagnostico | Q salir
 
 Reglas activas: solo tu lado (filas 1 y 2), sin capturas, sin enroque y sin promocion.
 El tablero logico arranca en la posicion inicial y se actualiza cuando la camara confirma
 cada movimiento.
 """
 import argparse
+import json
+import os
 import textwrap
 import threading
 import time
@@ -69,6 +72,12 @@ class Juego(V.App):
         self.mi_color = chess.WHITE        # tu lado son las filas 1 y 2
         self.clf = clasificador.Clasificador()
         self.tipos = {}
+        self.frame = None                  # ultimo frame crudo: lo necesita la calibracion de altura
+        self.calib_top = None              # lista de 4 clics mientras se calibra H_top
+        self.H_top = None
+        if os.path.exists(V.ARCHIVO_TOP):
+            with open(V.ARCHIVO_TOP) as f:
+                self.H_top = np.array(json.load(f), np.float32)
         x0, x1 = V.BOARD_PIXELS + 20, V.BOARD_PIXELS + PANEL_W - 20
         mitad = (x0 + x1) // 2
         self.botones = [
@@ -155,15 +164,23 @@ class Juego(V.App):
         eq = self.equipo_propio()
         if eq is None or not self.clf.listo():
             return
+        rc = self.rect_clasif(rect)
         for row in range(8):
             for col in range(8):
                 if self.t.estable[row, col] and self.t.color[row, col] == eq:
-                    tipo, conf = self.clf.predecir(clasificador.recorte(rect, col, row, V.STEP))
+                    tipo, conf = self.clf.predecir(clasificador.recorte(rc, col, row, V.STEP))
                     if tipo:
                         self.tipos[V.nombre_casilla(col, row)] = (tipo, conf)
 
+    def rect_clasif(self, rect):
+        """Vista rectificada a la altura de los stickers (si se calibro), si no la normal."""
+        if self.H_top is None or self.frame is None:
+            return rect
+        return cv2.warpPerspective(self.frame, self.H_top, (V.BOARD_PIXELS, V.BOARD_PIXELS))
+
     def entrenar(self, rect):
         """Entrena con las 16 piezas en la posicion inicial (filas 1 y 2)."""
+        rc = self.rect_clasif(rect)
         eq = self.equipo_propio()
         if eq is None:
             self.msg("No detecto piezas de tu lado (filas 1-2). Revisa con D.", V.ROJO, 8)
@@ -174,7 +191,7 @@ class Juego(V.App):
                 n = f"{col}{fila}"
                 c, r = V.indices(n)
                 if self.t.ocupada(n) and self.t.color[r, c] == eq:
-                    muestras.append((clasificador.recorte(rect, c, r, V.STEP),
+                    muestras.append((clasificador.recorte(rc, c, r, V.STEP),
                                      clasificador.tipo_inicial(n)))
         if len(muestras) != 16:
             self.msg(f"Hay {len(muestras)} piezas de tu equipo en filas 1-2 (deben ser 16). "
@@ -275,6 +292,25 @@ class Juego(V.App):
                 b["accion"]()
                 return
 
+    def clic_camara(self, event, x, y, flags, param):
+        """Clics en la ventana de la camara: esquinas del tablero o centro de los stickers."""
+        if self.calib_top is None:
+            return super().clic_camara(event, x, y, flags, param)
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        self.calib_top.append((x, y))
+        if len(self.calib_top) < 4:
+            self.msg(f"Sticker {len(self.calib_top)}/4 guardado", V.AMARILLO, 30)
+            return
+        s = V.STEP
+        dst = np.float32([[0.5 * s, 7.5 * s], [7.5 * s, 7.5 * s],
+                          [7.5 * s, 0.5 * s], [0.5 * s, 0.5 * s]])
+        self.H_top = cv2.getPerspectiveTransform(np.float32(self.calib_top), dst)
+        self.calib_top = None
+        with open(V.ARCHIVO_TOP, "w") as f:
+            json.dump(self.H_top.tolist(), f)
+        self.msg("Calibracion de altura guardada", V.VERDE, 8)
+
     def teclado(self, key, frame):
         if key != 255:
             c = chr(key).lower()
@@ -289,6 +325,10 @@ class Juego(V.App):
                     self.msg("Falta calibrar el tablero (C)", V.ROJO, 6)
                 else:
                     self.entrenar(self.t.rectificar(frame))
+                return True
+            if c == "h":
+                self.calib_top = []
+                self.msg("Clic en el CENTRO del sticker de A1, H1, H8 y A8 (en ese orden)", V.AMARILLO, 30)
                 return True
         return super().teclado(key, frame)
 
@@ -427,6 +467,7 @@ def main():
         if not ok:
             print("Error: la camara dejo de responder")
             break
+        app.frame = frame
         cv2.imshow(V.WINDOW_CAMERA, app.vista_camara(frame))
         rect = None
         if app.t.H is not None:

@@ -55,6 +55,7 @@ FRACCION_OCUPADA = 0.20        # fraccion de pixeles cambiados => hay pieza
 CANNY_BAJO, CANNY_ALTO = 20, 60   # sensibilidad de bordes (piezas de poco contraste)
 FRACCION_BORDES = 0.03         # fraccion de bordes NUEVOS => hay pieza (piezas del mismo tono que la casilla)
 FRAMES_ESTABLES = 6            # frames seguidos iguales para aceptar un cambio
+FRAMES_RESYNC = 45             # frames con la MISMA lectura rara => es real, no una mano
 UMBRAL_EQUIPO = 0.08           # fraccion de pixeles verdes o rojos para llamar "R" a la tablita
 VERIF_ESPERA_S = 2.5           # espera antes de verificar con la camara tras mover
 MAX_CAMBIOS = 6                # si cambian mas casillas DE GOLPE es un brazo o una mano tapando: se ignora
@@ -64,6 +65,7 @@ DIR_DATOS = os.path.dirname(os.path.abspath(__file__))
 ARCHIVO_CALIB = os.path.join(DIR_DATOS, "calibracion_tablero.json")
 ARCHIVO_FONDO = os.path.join(DIR_DATOS, "fondo_vacio.png")
 ARCHIVO_MAPA = os.path.join(DIR_DATOS, "mapa_casillas.csv")
+ARCHIVO_TOP = os.path.join(DIR_DATOS, "calibracion_top.json")
 
 WINDOW_CAMERA = "Camara - tablero"
 WINDOW_BOARD = "Tablero rectificado"
@@ -197,12 +199,16 @@ class Tablero:
         self.raw_color = np.full((8, 8), "", dtype="<U1")
         self.ocluido = False                        # True si algo (brazo, mano) tapa mucho tablero
         self.sin_lectura_inicial = True
+        self._prev_raw = None
+        self._ocl_estable = 0
 
     def reiniciar_ocupacion(self):
         self.estable[:] = False
         self.cuenta[:] = 0
         self.color[:] = ""
         self.sin_lectura_inicial = True             # la primera lectura se acepta tal cual
+        self._prev_raw = None
+        self._ocl_estable = 0
 
     def calibrar(self):
         if len(self.esquinas) != 4:
@@ -245,6 +251,8 @@ class Tablero:
         self.ocluido = False
         if congelado:
             self.cuenta[:] = 0
+            self._ocl_estable = 0
+            self._prev_raw = None
             return
         if self.sin_lectura_inicial:
             self.aceptar_lectura()
@@ -254,7 +262,17 @@ class Tablero:
         if cambia.sum() > MAX_CAMBIOS:
             self.cuenta[:] = 0
             self.ocluido = True
+            if self._prev_raw is not None and (ocup == self._prev_raw).all():
+                self._ocl_estable += 1          # la lectura no se mueve: no parece una mano
+            else:
+                self._ocl_estable = 0
+            self._prev_raw = ocup.copy()
+            if self._ocl_estable >= FRAMES_RESYNC:
+                self.aceptar_lectura()
+                self.ocluido = False
             return
+        self._ocl_estable = 0
+        self._prev_raw = None
         self.cuenta[cambia] += 1
         self.cuenta[~cambia] = 0
         ok = self.cuenta >= FRAMES_ESTABLES
@@ -267,6 +285,8 @@ class Tablero:
         self.estable[:] = self.raw
         self.color[:] = np.where(self.raw, self.raw_color, "")
         self.cuenta[:] = 0
+        self._prev_raw = None
+        self._ocl_estable = 0
 
     def aplicar_movimiento(self, origen, destino):
         """Tras un movimiento del robot: el origen queda libre y el destino ocupado (la camara lo confirmara)."""
