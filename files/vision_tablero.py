@@ -55,7 +55,7 @@ FRACCION_OCUPADA = 0.20        # fraccion de pixeles cambiados => hay pieza
 CANNY_BAJO, CANNY_ALTO = 20, 60   # sensibilidad de bordes (piezas de poco contraste)
 FRACCION_BORDES = 0.03         # fraccion de bordes NUEVOS => hay pieza (piezas del mismo tono que la casilla)
 FRAMES_ESTABLES = 6            # frames seguidos iguales para aceptar un cambio
-GRIS_PIEZA_BLANCA = 120        # brillo medio de la pieza para llamarla blanca
+UMBRAL_EQUIPO = 0.08           # fraccion de pixeles verdes o rojos para llamar "R" a la tablita
 VERIF_ESPERA_S = 2.5           # espera antes de verificar con la camara tras mover
 MAX_CAMBIOS = 6                # si cambian mas casillas DE GOLPE es un brazo o una mano tapando: se ignora
 DESCANSO_S = 1.0               # tras moverse el robot se espera antes de volver a leer el tablero
@@ -132,10 +132,19 @@ def _mascara_borde():
     return _MASCARA_BORDE
 
 
+def equipo(zona_bgr):
+    """Equipo de la tablita por color: 'R' = verde con sticker rojo, 'N' = sticker negro."""
+    hsv = cv2.cvtColor(zona_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    verde = ((h > 40) & (h < 90) & (s > 70) & (v > 50)).mean()
+    rojo = (((h < 10) | (h > 170)) & (s > 120) & (v > 60)).mean()
+    return "R" if (verde + rojo) > UMBRAL_EQUIPO else "N"
+
+
 def analizar(actual, fondo):
     """
     Compara el tablero rectificado actual contra el vacio.
-    Devuelve (ocupada[8,8], color[8,8] 'W'/'B'/'', frac_cambio[8,8], frac_bordes[8,8]).
+    Devuelve (ocupada[8,8], color[8,8] 'R'/'N'/'', frac_cambio[8,8], frac_bordes[8,8]).
     """
     g1 = cv2.GaussianBlur(cv2.cvtColor(actual, cv2.COLOR_BGR2GRAY), (5, 5), 0)
     g0 = cv2.GaussianBlur(cv2.cvtColor(fondo, cv2.COLOR_BGR2GRAY), (5, 5), 0)
@@ -164,9 +173,7 @@ def analizar(actual, fondo):
             fbor[row, col] = (bordes_nuevos[y1:y2, x1:x2] > 0).mean()
             if frac[row, col] > FRACCION_OCUPADA or fbor[row, col] > FRACCION_BORDES:
                 ocup[row, col] = True
-                zona = g1[y1:y2, x1:x2]
-                px = zona[mascara] if mascara.any() else zona.reshape(-1)
-                color[row, col] = "W" if px.mean() > GRIS_PIEZA_BLANCA else "B"
+                color[row, col] = equipo(actual[y1:y2, x1:x2])
     return ocup, color, frac, fbor
 
 
@@ -308,7 +315,7 @@ def dibujar_tablero(rect, t, origen=None, debug=False):
     for row in range(8):
         for col in range(8):
             if t.estable[row, col]:
-                c = VERDE if t.color[row, col] == "W" else NARANJA
+                c = VERDE if t.color[row, col] == "R" else NARANJA
                 cv2.rectangle(capa, (col * STEP + 3, row * STEP + 3),
                               ((col + 1) * STEP - 3, (row + 1) * STEP - 3), c, -1)
     out = cv2.addWeighted(capa, 0.35, out, 0.65, 0)
