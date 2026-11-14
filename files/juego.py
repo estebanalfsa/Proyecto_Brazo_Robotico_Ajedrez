@@ -1,0 +1,315 @@
+"""
+juego.py - Interfaz de juego: tablero con lo que ve la camara + ORIGEN / DESTINO + boton JUGAR
+==============================================================================================
+Une los dos programas en uno solo (usa vision_tablero.py y robot.py, sin tocarlos):
+
+   camara -> que casillas tienen pieza -> se comprueba la jugada -> el robot la hace -> la camara la verifica
+
+Antes de dejar jugar comprueba, con lo que ve la camara AHORA:
+   1. la casilla de ORIGEN tiene pieza           (si esta vacia: no se puede)
+   2. la casilla de DESTINO esta libre           (si esta ocupada: no se puede, elige otra)
+   3. el brazo llega a esas casillas (estan ensenadas o se calculan)
+   4. el tablero no esta tapado por una mano o el brazo y la lectura es estable
+   5. el robot no esta ocupado con otro movimiento
+
+Uso:
+    python juego.py --listar                       (que numero de camara funciona)
+    python juego.py --camara 1                     (simulacion, sin robot)
+    python juego.py --camara 1 --puerto COM6       (con robot)
+
+Primera vez (ventana de la camara): clic en las 4 esquinas, C, O hasta que A1 quede abajo-izquierda
+(lado del robot), quita las piezas y pulsa E, vuelve a poner las piezas. Se guarda y no hay que repetirlo
+mientras la camara no se mueva (si se mueve: R y recalibrar).
+
+En la ventana del juego: clic en una casilla = ORIGEN, otro clic = DESTINO, boton JUGAR (o tecla J).
+Teclas: J jugar | L limpiar | X PARADA | U releer el tablero | D diagnostico | Q salir
+"""
+import argparse
+import textwrap
+import threading
+import time
+
+import cv2
+import numpy as np
+
+import robot
+import vision_tablero as V
+
+if not hasattr(robot.Brazo, "retirar"):
+    raise SystemExit("Actualiza robot.py: falta la pose de retirada (Brazo.retirar).")
+
+VENTANA = "Ajedrez robot"
+PANEL_W = 360
+ALTO = V.BOARD_PIXELS
+FONDO = (38, 38, 38)
+GRIS = (110, 110, 110)
+GRIS_CLARO = (170, 170, 170)
+
+
+class Juego(V.App):
+    def __init__(self, brazo):
+        super().__init__(brazo)
+        self.sel_o = None
+        self.sel_d = None
+        x0, x1 = V.BOARD_PIXELS + 20, V.BOARD_PIXELS + PANEL_W - 20
+        mitad = (x0 + x1) // 2
+        self.botones = [
+            {"rect": (x0, 440, x1, 505), "texto": "JUGAR", "color": V.VERDE, "accion": self.jugar, "id": "jugar"},
+            {"rect": (x0, 518, mitad - 8, 558), "texto": "LIMPIAR", "color": GRIS, "accion": self.limpiar, "id": "limpiar"},
+            {"rect": (mitad + 8, 518, x1, 558), "texto": "PARAR", "color": V.ROJO, "accion": self.parar, "id": "parar"},
+            {"rect": (x0, 572, mitad - 8, 612), "texto": "REPOSO SEGURO", "color": (0, 120, 200), "accion": self.reposo_seguro, "id": "reposo"},
+            {"rect": (mitad + 8, 572, x1, 612), "texto": "RETIRAR BRAZO", "color": (150, 100, 0), "accion": self.retirar_brazo, "id": "retirar"},
+        ]
+
+    # ---------------- seleccion ----------------
+    def seleccionar(self, nombre):
+        if self.sel_o is None or self.sel_d is not None:       # empezar una jugada nueva
+            self.sel_o, self.sel_d = nombre, None
+        elif nombre == self.sel_o:                             # clic otra vez en el origen: anula
+            self.sel_o = None
+        else:
+            self.sel_d = nombre
+
+    def ingresar_casilla(self, nombre):                        # tambien las que se escriben con M
+        self.seleccionar(nombre)
+
+    def limpiar(self):
+        self.sel_o = self.sel_d = None
+
+    # ---------------- comprobaciones ----------------
+    def estado_jugada(self):
+        """(ok, texto, color, que_limpiar) segun lo que ve la camara AHORA.
+        que_limpiar si falla: 'nada' (motivo pasajero), 'destino' (elegir otro destino) o 'todo'."""
+        t, o, d = self.t, self.sel_o, self.sel_d
+        if o is None:
+            return False, "Elige la casilla de ORIGEN (clic en el tablero).", V.BLANCO, "nada"
+        if d is None:
+            if t.fondo_rect is not None and not t.ocupada(o):
+                return False, f"En {o} NO hay pieza (segun la camara). Elige otro origen.", V.ROJO, "todo"
+            if t.fondo_rect is not None:
+                return False, f"Origen {o} con pieza. Ahora elige la casilla de DESTINO.", V.AMARILLO, "nada"
+            return False, f"Origen {o}. Ahora elige el DESTINO.", V.AMARILLO, "nada"
+        if self.brazo.ocupado:
+            return False, "Robot ocupado: espera a que termine el movimiento.", V.NARANJA, "nada"
+        if t.fondo_rect is None:
+            return False, "Falta capturar el tablero VACIO (tecla E en la ventana de la camara).", V.ROJO, "nada"
+        ok, texto, conservar = self.validar(o, d)
+        if not ok:
+            return False, texto, V.ROJO, ("destino" if conservar else "todo")
+        if t.ocluido:
+            return False, "El tablero esta TAPADO (mano o brazo). Espera un momento.", V.ROJO, "nada"
+        if self.congelado():
+            return False, "Estabilizando la lectura de la camara...", V.AMARILLO, "nada"
+        if (t.cuenta > 0).any():
+            return False, "Leyendo el tablero, espera un instante...", V.AMARILLO, "nada"
+        return True, f"{o} -> {d}: origen con pieza y destino libre. Listo para JUGAR.", V.VERDE, "nada"
+
+    # ---------------- acciones ----------------
+    def jugar(self):
+        ok, texto, color, limpiar = self.estado_jugada()
+        if not ok:
+            print("RECHAZADO:", texto)
+            self.msg(texto, V.ROJO, 8)
+            if limpiar == "destino":
+                self.sel_d = None                       # el origen vale: solo falta otro destino
+            elif limpiar == "todo":
+                self.limpiar()
+            return                                      # 'nada': la seleccion se queda para reintentar
+        o, d = self.sel_o, self.sel_d
+        self.limpiar()
+        self.solicitar(o, d)
+
+    def parar(self):
+        self.brazo.parar()
+        self.msg("PARADA DE EMERGENCIA", V.ROJO, 10)
+
+    def _en_hilo(self, hacer, ok_msg):
+        if self.brazo.ocupado:
+            self.msg("Robot ocupado: espera a que termine", V.ROJO, 6)
+            return
+        self.brazo.ocupado = True
+
+        def tarea():
+            try:
+                hacer()
+                self.msg(ok_msg, V.VERDE, 15)
+            except Exception as e:
+                print("ERROR del robot:", e)
+                self.msg(f"Error del robot: {e}", V.ROJO, 15)
+            finally:
+                self.libre_desde = time.time() + V.DESCANSO_S
+                self.brazo.ocupado = False
+
+        threading.Thread(target=tarea, daemon=True).start()
+
+    def reposo_seguro(self):
+        self._en_hilo(self.brazo.reposo, "Brazo en REPOSO SEGURO (apoyado). Ya puedes apagar la fuente.")
+
+    def retirar_brazo(self):
+        self._en_hilo(self.brazo.retirar, "Brazo retirado (fuera del encuadre de la camara).")
+
+    # ---------------- entrada ----------------
+    def clic(self, event, x, y, flags, param):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        if x < V.BOARD_PIXELS and y < V.BOARD_PIXELS:
+            if self.t.H is not None:
+                self.seleccionar(V.nombre_casilla(min(7, x // V.STEP), min(7, y // V.STEP)))
+            return
+        for b in self.botones:
+            x1, y1, x2, y2 = b["rect"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                b["accion"]()
+                return
+
+    def teclado(self, key, frame):
+        if key != 255:
+            c = chr(key).lower()
+            if c == "j":
+                self.jugar()
+                return True
+            if c == "l":
+                self.limpiar()
+                return True
+        return super().teclado(key, frame)
+
+    # ---------------- dibujo ----------------
+    def _caja(self, panel, titulo, valor, rect, color, activa):
+        x1, y1, x2, y2 = rect
+        cv2.rectangle(panel, (x1, y1), (x2, y2), color if activa else GRIS, 3 if activa else 1)
+        V.texto(panel, titulo, (x1 + 10, y1 + 20), 0.5, GRIS_CLARO, 1)
+        V.texto(panel, valor, (x1 + 10, y2 - 12), 1.0, color if valor != "--" else GRIS, 2)
+
+    def render(self, rect):
+        t = self.t
+        if rect is None:
+            tab = np.full((ALTO, V.BOARD_PIXELS, 3), (70, 70, 70), np.uint8)
+            pasos = ["Falta calibrar el tablero.", "En la ventana de la camara:", "1) clic en las 4 esquinas",
+                     "2) pulsa C", "3) pulsa O hasta que A1", "    quede abajo-izquierda", "4) quita las piezas, pulsa E"]
+            for i, linea in enumerate(pasos):
+                V.texto(tab, linea, (40, 200 + 34 * i), 0.7, V.BLANCO, 1)
+        else:
+            tab = V.dibujar_tablero(rect, t, None, self.debug)
+            for nombre, color, rotulo in ((self.sel_o, V.AMARILLO, "ORIGEN"), (self.sel_d, V.CIAN, "DESTINO")):
+                if nombre:
+                    c, r = V.indices(nombre)
+                    cv2.rectangle(tab, (c * V.STEP + 2, r * V.STEP + 2),
+                                  ((c + 1) * V.STEP - 2, (r + 1) * V.STEP - 2), color, 4)
+                    V.texto(tab, rotulo, (c * V.STEP + 6, (r + 1) * V.STEP - 8), 0.4, color, 1)
+            if self.congelado():
+                V.texto(tab, "ROBOT MOVIENDO - lectura congelada", (V.BOARD_PIXELS // 2 - 160, 20), 0.6, V.ROJO, 2)
+            elif t.ocluido:
+                V.texto(tab, "TAPADO (mano o brazo): sin actualizar", (V.BOARD_PIXELS // 2 - 170, 20), 0.6, V.ROJO, 2)
+
+        panel = np.full((ALTO, PANEL_W, 3), FONDO, np.uint8)
+        x0, x1 = 20, PANEL_W - 20
+        V.texto(panel, "AJEDREZ ROBOT", (x0, 38), 0.9, V.BLANCO, 2)
+        V.texto(panel, "Clic en el tablero: 1) origen  2) destino", (x0, 64), 0.45, GRIS_CLARO, 1)
+        self._caja(panel, "ORIGEN", self.sel_o or "--", (x0, 80, x1, 148), V.AMARILLO, self.sel_o is None)
+        self._caja(panel, "DESTINO", self.sel_d or "--", (x0, 158, x1, 226), V.CIAN, self.sel_o is not None and self.sel_d is None)
+
+        ok, texto, color, _ = self.estado_jugada()
+        y = 252
+        for linea in textwrap.wrap(texto, 34)[:3]:
+            V.texto(panel, linea, (x0, y), 0.55, color, 1)
+            y += 24
+        V.texto(panel, "ROBOT: MOVIENDO" if self.brazo.ocupado else "ROBOT: listo", (x0, 340), 0.5,
+                V.NARANJA if self.brazo.ocupado else V.VERDE, 1)
+        if t.H is None or t.fondo_rect is None:
+            cam, ccol = "CAMARA: falta calibrar / tablero vacio (E)", V.ROJO
+        elif t.ocluido:
+            cam, ccol = "CAMARA: tablero tapado", V.ROJO
+        elif self.congelado():
+            cam, ccol = "CAMARA: lectura congelada", V.NARANJA
+        else:
+            cam, ccol = "CAMARA: leyendo bien", V.VERDE
+        V.texto(panel, cam, (x0, 364), 0.5, ccol, 1)
+        s, scol, hasta = self.mensaje
+        if s and time.time() < hasta:
+            y = 394
+            for linea in textwrap.wrap(s, 40)[:2]:
+                V.texto(panel, linea, (x0, y), 0.45, scol, 1)
+                y += 20
+
+        for b in self.botones:
+            x1b, y1b, x2b, y2b = b["rect"]
+            col = b["color"] if (b["id"] != "jugar" or ok) else (80, 80, 80)
+            cv2.rectangle(panel, (x1b - V.BOARD_PIXELS, y1b), (x2b - V.BOARD_PIXELS, y2b), col, -1)
+            esc = 1.0 if b["id"] == "jugar" else 0.5
+            (w, h), _ = cv2.getTextSize(b["texto"], V.FONT, esc, 2 if b["id"] == "jugar" else 1)
+            cx = (x1b + x2b) // 2 - V.BOARD_PIXELS
+            V.texto(panel, b["texto"], (cx - w // 2, (y1b + y2b) // 2 + h // 2), esc, V.BLANCO,
+                    2 if b["id"] == "jugar" else 1)
+        return np.hstack([tab, panel])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--camara", type=int, default=V.CAMERA_INDEX)
+    ap.add_argument("--puerto", help="puerto del Arduino (ej. COM6). Sin puerto = simulacion")
+    ap.add_argument("--listar", action="store_true", help="prueba los numeros de camara y sale")
+    args = ap.parse_args()
+    if args.listar:
+        V.listar_camaras()
+        return
+
+    try:
+        brazo = robot.Brazo(args.puerto)
+    except RuntimeError as e:
+        print("ERROR:", e)
+        return
+    if args.puerto:
+        if not robot.confirmar_encendido():
+            return
+        try:
+            brazo.activar()
+            print("Retirando el brazo fuera del encuadre de la camara...")
+            brazo.retirar()
+        except (RuntimeError, TimeoutError) as e:
+            print("ERROR:", e)
+            return
+
+    cap = V.abrir_camara(args.camara)
+    if cap is None:
+        print("Error: no se pudo abrir la camara", args.camara, "(prueba:  python juego.py --listar)")
+        return
+
+    app = Juego(brazo)
+    app.libre_desde = time.time() + 1.5               # espera a que el brazo termine de retirarse
+    if app.t.cargar():
+        print("Calibracion anterior cargada (si la camara se movio, pulsa R y recalibra).")
+        app.msg("Calibracion cargada. Revisa que el cuadro calce con el tablero", V.AMARILLO, 10)
+
+    cv2.namedWindow(V.WINDOW_CAMERA)
+    cv2.namedWindow(VENTANA)
+    cv2.setMouseCallback(V.WINDOW_CAMERA, app.clic_camara)
+    cv2.setMouseCallback(VENTANA, app.clic)
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            print("Error: la camara dejo de responder")
+            break
+        cv2.imshow(V.WINDOW_CAMERA, app.vista_camara(frame))
+        rect = None
+        if app.t.H is not None:
+            rect = app.t.rectificar(frame)
+            app.procesar(rect)
+        cv2.imshow(VENTANA, app.render(rect))
+        app.revisar_verificacion()
+        if not app.teclado(cv2.waitKey(1) & 0xFF, frame):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    if args.puerto and brazo.activo:
+        if input("Llevar el brazo al REPOSO SEGURO antes de salir? (S/n): ").strip().lower() != "n":
+            try:
+                brazo.reposo()
+                print("Brazo en reposo seguro. Ya puedes apagar la fuente.")
+            except (RuntimeError, TimeoutError) as e:
+                print("ERROR:", e)
+
+
+if __name__ == "__main__":
+    main()
