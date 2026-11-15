@@ -95,6 +95,25 @@ Vuelve a entrenar si mueves la camara, cambias mucho la luz o cambias de tablero
 
 Reglas activas: solo tu lado, sin capturas, sin enroque y sin promocion.
 
+## Probar piezas sueltas
+
+El tablero logico arranca en la posicion inicial completa. Si quitas piezas de la
+mesa, para el programa siguen existiendo y una torre puede quedar bloqueada por un
+peon que ya no esta.
+
+Para probar una pieza sola:
+
+1. Deja en la mesa solo las piezas que quieras probar.
+2. Pulsa `D` y comprueba que la camara las ve.
+3. Pulsa `S`. El programa reconstruye el tablero logico con lo que ve:
+   las piezas de tu equipo se colocan con su tipo reconocido y cualquier otra
+   casilla ocupada bloquea el paso.
+4. Selecciona el origen. Los puntos verdes son los destinos legales segun esas piezas.
+5. Si mueves piezas a mano, vuelve a pulsar `S`.
+
+`S` necesita el clasificador entrenado y una lectura estable. No crea una partida
+completa: sirve para comprobar alcance y bloqueos pieza por pieza.
+
 ## Teclas
 
 Ventana del juego:
@@ -106,6 +125,8 @@ Ventana del juego:
 | `L` | Limpiar origen y destino |
 | `P` | Entrenar el clasificador con la posicion inicial |
 | `H` | Calibrar la altura de los stickers |
+| `V` | Informe de validacion en muestra |
+| `S` | Sincronizar el tablero logico con la camara |
 | `X` | Parada de emergencia |
 | `Q` o `Esc` | Salir |
 
@@ -145,6 +166,7 @@ Letra de equipo: `R` tablita verde con sticker rojo, `N` sticker negro.
 | Todo desplazado tras mover la camara | `R`, recalibrar y `E` |
 | "No hay pieza en X" | Revisa `D`; suele ser contraste o calibracion |
 | El clasificador no acierta | Reentrena con buena luz y repite el intercambio A1/B1 |
+| Una torre no se mueve aunque delante no haya nada | Pulsa `S` para reconstruir el tablero logico con la camara |
 | La camara no confirma el movimiento | Revisa `U` y `D`; el tablero logico no avanza |
 | Falta python-chess | `py -m pip install chess` |
 
@@ -157,8 +179,9 @@ Se ignoran: `__pycache__/`, `*.pyc`, `mapa_casillas.csv` y temporales.
 ## Limitaciones de esta fase
 
 - Solo se mueve tu lado. No hay oponente, capturas, enroque ni promocion.
-- El tablero logico arranca en la posicion inicial. Si montas otra posicion,
-  las reglas no coinciden con lo que hay en la mesa.
+- El tablero logico arranca en la posicion inicial. Para otra posicion pulsa `S`
+  y reconstruye desde la camara. `S` es un modo de prueba: las piezas de tu equipo
+  usan el tipo reconocido y el resto de casillas ocupadas solo bloquean.
 - El clasificador es un KNN sobre la imagen binarizada del sticker, no una red
   neuronal. Depende de la luz, del contraste y del paralaje.
 - La deteccion de equipo por color puede fallar con otra luz o con tableros de

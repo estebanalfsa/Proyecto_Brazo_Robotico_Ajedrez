@@ -26,11 +26,13 @@ Al elegir el origen se marcan con un punto verde las casillas legales (python-ch
 Si el clasificador esta entrenado, sobre cada pieza de tu lado aparece su tipo: verde si coincide
 con lo esperado en la posicion inicial, rojo si no.
 Teclas: J jugar | L limpiar | P entrenar clasificador | H calibrar altura de stickers
-        V informe de validacion | X PARADA | U releer el tablero | D diagnostico | Q salir
+        V informe de validacion | S sincronizar tablero con la camara
+        X PARADA | U releer el tablero | D diagnostico | Q salir
 
-Reglas activas: solo tu lado (filas 1 y 2), sin capturas, sin enroque y sin promocion.
+Reglas activas: solo tu lado, sin capturas, sin enroque y sin promocion.
 El tablero logico arranca en la posicion inicial y se actualiza cuando la camara confirma
-cada movimiento.
+cada movimiento. Con S se reconstruye desde la camara para probar piezas sueltas: las piezas
+de tu equipo se colocan con su tipo y cualquier otra casilla ocupada bloquea el paso.
 """
 import argparse
 import json
@@ -60,6 +62,8 @@ ALTO = V.BOARD_PIXELS
 FONDO = (38, 38, 38)
 GRIS = (110, 110, 110)
 GRIS_CLARO = (170, 170, 170)
+TIPOS_CHESS = {"P": chess.PAWN, "N": chess.KNIGHT, "B": chess.BISHOP,
+               "R": chess.ROOK, "Q": chess.QUEEN, "K": chess.KING}
 
 
 class Juego(V.App):
@@ -154,8 +158,8 @@ class Juego(V.App):
 
     # ---------------- reconocimiento ----------------
     def equipo_propio(self):
-        """'R' o 'N' segun la mayoria de las piezas vistas en las filas 1 y 2."""
-        vals = [self.t.color[r, c] for r in (6, 7) for c in range(8)
+        """'R' o 'N' segun la mayoria de las piezas vistas en todo el tablero."""
+        vals = [self.t.color[r, c] for r in range(8) for c in range(8)
                 if self.t.estable[r, c] and self.t.color[r, c]]
         return max(set(vals), key=vals.count) if vals else None
 
@@ -237,6 +241,46 @@ class Juego(V.App):
             print("  Fallos:", ", ".join(f"{n} {e}->{v}" for n, e, v in mal))
         self.msg(f"Validacion: {aciertos}/{len(filas)} aciertos (detalle en consola)",
                  V.VERDE if aciertos == len(filas) else V.NARANJA, 15)
+
+    def sincronizar_logico(self):
+        """Rehace el tablero logico con lo que ve la camara. Modo de prueba.
+        Las piezas de tu equipo se colocan con el tipo reconocido. Cualquier otra
+        casilla ocupada se pone como peon negro, solo para que bloquee el paso."""
+        if not self.clf.listo():
+            self.msg("Clasificador sin entrenar: no puedo saber el tipo (P)", V.ROJO, 8)
+            return
+        eq = self.equipo_propio()
+        if eq is None:
+            self.msg("No detecto piezas en el tablero", V.ROJO, 8)
+            return
+        tablero = chess.Board(None)
+        propias, bloqueos, sin_tipo = 0, 0, []
+        for row in range(8):
+            for col in range(8):
+                if not self.t.estable[row, col]:
+                    continue
+                nombre = V.nombre_casilla(col, row)
+                sq = chess.parse_square(nombre.lower())
+                tipo = self.tipos.get(nombre, (None, 0.0))[0]
+                if self.t.color[row, col] == eq and tipo:
+                    tablero.set_piece_at(sq, chess.Piece(TIPOS_CHESS[tipo], chess.WHITE))
+                    propias += 1
+                else:
+                    tablero.set_piece_at(sq, chess.Piece(chess.PAWN, chess.BLACK))
+                    bloqueos += 1
+                    if self.t.color[row, col] == eq:
+                        sin_tipo.append(nombre)
+        tablero.turn = chess.WHITE
+        self.logico = tablero
+        self.limpiar()
+        detalle = f"{propias} pieza{'s' if propias != 1 else ''} tuya{'s' if propias != 1 else ''}"
+        if bloqueos:
+            detalle += f", {bloqueos} casilla{'s' if bloqueos != 1 else ''} ocupada"
+            detalle += f"{'s' if bloqueos != 1 else ''} como bloqueo"
+        if sin_tipo:
+            detalle += f" (sin tipo: {' '.join(sin_tipo)})"
+        self.msg(f"Tablero sincronizado: {detalle}", V.VERDE if propias else V.NARANJA, 12)
+        print(f"Tablero sincronizado desde la camara: {detalle}")
 
     # ---------------- comprobaciones ----------------
     def estado_jugada(self):
@@ -376,6 +420,12 @@ class Juego(V.App):
                     self.msg("Falta calibrar el tablero (C)", V.ROJO, 6)
                 else:
                     self.informe_validacion(self.t.rectificar(frame))
+                return True
+            if c == "s":
+                if self.congelado() or self.t.ocluido:
+                    self.msg("Robot moviendose o tablero tapado: espera antes de sincronizar", V.NARANJA, 6)
+                else:
+                    self.sincronizar_logico()
                 return True
         return super().teclado(key, frame)
 
