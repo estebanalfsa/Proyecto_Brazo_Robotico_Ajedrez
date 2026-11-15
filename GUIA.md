@@ -3,7 +3,16 @@
 Brazo de ajedrez con Arduino, visión OpenCV y reconocimiento de piezas.
 Esta guía cubre la fase de reconocimiento (solo tu lado, filas 1 y 2).
 
+Para instalación en otra computadora, arquitectura, algoritmos y referencia
+completa de comandos, consulta `DOCUMENTACION.md`.
+
 ## Requisitos
+
+```
+py -m pip install -r ..\requirements.txt
+```
+
+O, si prefieres instalarlos a mano:
 
 ```
 py -m pip install opencv-python numpy pyserial chess
@@ -186,5 +195,5 @@ Se ignoran: `__pycache__/`, `*.pyc`, `mapa_casillas.csv` y temporales.
   neuronal. Depende de la luz, del contraste y del paralaje.
 - La deteccion de equipo por color puede fallar con otra luz o con tableros de
   casillas verdes o rojas. El umbral esta en `UMBRAL_EQUIPO` (0.08).
-- Queda pendiente la Etapa 6 del brazo: reensenar con apertura minima de pinza,
-  traslado mas alto, interpolacion lineal y posible paso a 32 casillas.
+- Queda pendiente afinar la pinza y el traslado: apertura minima, altura de
+  traslado y fuerza de agarre segun el tipo de pieza.

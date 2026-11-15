@@ -1,0 +1,15 @@
+# Dependencias del brazo de ajedrez.
+# Versiones probadas en este equipo:
+#   Python 3.14.4
+#   opencv-python 5.0.0.93
+#   numpy 2.5.3
+#   pyserial 3.5
+#   chess 1.11.2
+#
+# En otra computadora se pueden instalar versiones recientes. El codigo no usa
+# cv2.ml, asi que funciona con OpenCV 4.x y 5.x.
+
+opencv-python>=4.8
+numpy>=1.24
+pyserial>=3.5
+chess>=1.10
