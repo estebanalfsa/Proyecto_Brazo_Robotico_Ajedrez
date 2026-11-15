@@ -385,11 +385,8 @@ def verificar_modo_real():
                            "(recomendado) o mide el brazo y pon GEOMETRIA_CONFIRMADA = True")
 
 
-def confirmar_encendido():
-    """Secuencia segura. El Arduino se REINICIA al abrir el puerto y los servos pierden la senal
-    (un servo sin senal no sujeta nada), por eso la fuente de los servos debe estar apagada hasta aqui."""
-    print("\n1) El brazo debe estar FISICAMENTE en la pose de reposo, apoyado en sus topes.")
-    print("2) Enciende AHORA la fuente de los servos (hasta este momento debia estar apagada).")
+def confirmar_encendido(pose="de reposo, apoyado en sus topes"):
+    print(f"\n1) El brazo debe estar FISICAMENTE en la pose {pose}.")
     return input("Pulsa Enter para activar (n = cancelar): ").strip().lower() != "n"
 
 
@@ -449,7 +446,7 @@ class Brazo:
             raise RuntimeError("El firmware no informo sus limites: sube la version nueva de brazo_serial.ino")
         return datos["n"], datos["x"], datos["i"]
 
-    def activar(self):
+    def activar(self, desde=None):
         """El brazo debe estar FISICAMENTE en la pose de reposo."""
         global MN, MX, REPOSO, MUNECA_ROLL
         mn, mx, ini = self.leer_limites()          # se leen ANTES de activar
@@ -459,7 +456,8 @@ class Brazo:
         if POSES is None:
             MN, MX, REPOSO = tuple(mn), tuple(mx), tuple(ini)
             MUNECA_ROLL = REPOSO[3]
-        self._enviar("A", timeout=30)
+        cmd = "A" if desde is None else "A " + " ".join(str(int(a)) for a in desde)
+        self._enviar(cmd, timeout=30)
         self.activo = True
 
     def ir_pose(self, pose):

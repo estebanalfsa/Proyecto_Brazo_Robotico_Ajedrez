@@ -35,11 +35,19 @@ import numpy as np
 import robot
 import vision_tablero as V
 
+# NUEVAS IMPORTACIONES PARA CLASIFICADOR DE PIEZAS
+import chess
+import clasificador
+import json
+import os
+
+
 if not hasattr(robot.Brazo, "retirar"):
     raise SystemExit("Actualiza robot.py: falta la pose de retirada (Brazo.retirar).")
 
 VENTANA = "Ajedrez robot"
 PANEL_W = 360
+ARCHIVO_TOP = "calibracion_top.json"
 ALTO = V.BOARD_PIXELS
 FONDO = (38, 38, 38)
 GRIS = (110, 110, 110)
@@ -48,6 +56,17 @@ GRIS_CLARO = (170, 170, 170)
 
 class Juego(V.App):
     def __init__(self, brazo):
+        self.clf = clasificador.Clasificador()
+        self.logico = chess.Board()         # tablero logico (posicion inicial)
+        self.mi_color = chess.WHITE         # tu lado (filas 1-2), sea rojo o negro     
+        self.destinos = set()
+        self.tipos = {}
+        self.frame = None
+        self.calib_top = None
+        self.H_top = None
+        if os.path.exists(ARCHIVO_TOP):
+            with open(ARCHIVO_TOP) as f:
+                self.H_top = np.array(json.load(f), np.float32)
         super().__init__(brazo)
         self.sel_o = None
         self.sel_d = None
@@ -63,18 +82,20 @@ class Juego(V.App):
 
     # ---------------- seleccion ----------------
     def seleccionar(self, nombre):
-        if self.sel_o is None or self.sel_d is not None:       # empezar una jugada nueva
+        if self.sel_o is None or self.sel_d is not None:
             self.sel_o, self.sel_d = nombre, None
-        elif nombre == self.sel_o:                             # clic otra vez en el origen: anula
+        elif nombre == self.sel_o:
             self.sel_o = None
         else:
             self.sel_d = nombre
+            self.destinos = (self.casillas_legales(self.sel_o) or set()) if (self.sel_o and not self.sel_d) else set()
 
     def ingresar_casilla(self, nombre):                        # tambien las que se escriben con M
         self.seleccionar(nombre)
 
     def limpiar(self):
         self.sel_o = self.sel_d = None
+        self.destinos = set()
 
     # ---------------- comprobaciones ----------------
     def estado_jugada(self):
@@ -104,6 +125,144 @@ class Juego(V.App):
             return False, "Leyendo el tablero, espera un instante...", V.AMARILLO, "nada"
         return True, f"{o} -> {d}: origen con pieza y destino libre. Listo para JUGAR.", V.VERDE, "nada"
 
+    # ---------------- ajedrez ----------------
+    def casillas_legales(self, nombre):
+        """Casillas a las que puede ir esa pieza tuya, o None si no es tuya."""
+        sq = chess.parse_square(nombre.lower())
+        p = self.logico.piece_at(sq)
+        if p is None or p.color != self.mi_color:
+            return None
+        self.logico.turn = self.mi_color
+        return {chess.square_name(m.to_square).upper() for m in self.logico.legal_moves
+                if m.from_square == sq and not self.logico.is_capture(m)
+                and not self.logico.is_castling(m)}      # capturas y enroque: mas adelante
+
+    def validar(self, origen, destino):
+        ok, texto, conservar = super().validar(origen, destino)
+        if not ok:
+            return ok, texto, conservar
+        legales = self.casillas_legales(origen)
+        if legales is None:
+            return False, f"{origen} no es una pieza tuya", False
+        if destino not in legales:
+            return False, f"Esa pieza no puede ir a {destino}. Posibles: {' '.join(sorted(legales)) or 'ninguna'}", True
+        return True, "", False
+
+    def registrar_jugada(self, o, d):
+        a, b = chess.parse_square(o.lower()), chess.parse_square(d.lower())
+        self.logico.turn = self.mi_color
+        m = next((m for m in self.logico.legal_moves if m.from_square == a and m.to_square == b), None)
+        if m:
+            self.logico.push(m)
+        self.logico.turn = self.mi_color
+
+    def revisar_verificacion(self):
+        v = self.verificar
+        super().revisar_verificacion()
+        if v and time.time() >= v[0] and self.t.ocupada(v[2]) and not self.t.ocupada(v[1]):
+            self.registrar_jugada(v[1], v[2])           # la camara confirmo: se anota la jugada
+
+    # ---------------- reconocimiento ----------------
+    def equipo_propio(self):
+        vals = [x for x in self.t.color[6:8, :].flatten() if x]   # filas 2 y 1 (indices 6 y 7)
+        return max(set(vals), key=vals.count) if vals else None
+
+    def procesar(self, rect):
+        super().procesar(rect)
+        self.tipos = {}
+        eq = self.equipo_propio()
+        if eq is None or not self.clf.listo():
+            return
+        rc = self.rect_clasif(rect)
+        for row in range(8):
+            for col in range(8):
+                if self.t.estable[row, col] and self.t.color[row, col] == eq:
+                    tp, conf = self.clf.predecir(clasificador.recorte(rc, col, row, V.STEP))
+
+    def entrenar(self, rect):
+        eq = self.equipo_propio()
+        muestras = []
+        for fila in (1, 2):
+            for col in "ABCDEFGH":
+                n = f"{col}{fila}"
+                if self.t.ocupada(n) and self.t.color[V.indices(n)[1], V.indices(n)[0]] == eq:
+                    c, r = V.indices(n)
+                    muestras.append((clasificador.recorte(rect, c, r, V.STEP), clasificador.tipo_inicial(n)))
+        if len(muestras) != 16:
+            self.msg(f"Hay {len(muestras)} piezas de tu equipo en filas 1-2 (deben ser 16). No se entreno.", V.ROJO, 8)
+            return
+        self.clf.agregar_lote(muestras)
+        self.msg("Entrenado con la posicion inicial (16 piezas). Repite moviendo un poco las tablitas.", V.VERDE, 8)
+#--------------------------- RECONOCIMIENTO DE PIEZAS---------------------------    
+    # ---------------- ajedrez ----------------
+    def casillas_legales(self, nombre):
+        """Casillas a las que puede ir esa pieza tuya, o None si no es tuya."""
+        sq = chess.parse_square(nombre.lower())
+        p = self.logico.piece_at(sq)
+        if p is None or p.color != self.mi_color:
+            return None
+        self.logico.turn = self.mi_color
+        return {chess.square_name(m.to_square).upper() for m in self.logico.legal_moves
+                if m.from_square == sq and not self.logico.is_capture(m)
+                and not self.logico.is_castling(m)}      # capturas y enroque: mas adelante
+
+    def validar(self, origen, destino):
+        ok, texto, conservar = super().validar(origen, destino)
+        if not ok:
+            return ok, texto, conservar
+        legales = self.casillas_legales(origen)
+        if legales is None:
+            return False, f"{origen} no es una pieza tuya", False
+        if destino not in legales:
+            return False, f"Esa pieza no puede ir a {destino}. Posibles: {' '.join(sorted(legales)) or 'ninguna'}", True
+        return True, "", False
+
+    def registrar_jugada(self, o, d):
+        a, b = chess.parse_square(o.lower()), chess.parse_square(d.lower())
+        self.logico.turn = self.mi_color
+        m = next((m for m in self.logico.legal_moves if m.from_square == a and m.to_square == b), None)
+        if m:
+            self.logico.push(m)
+        self.logico.turn = self.mi_color
+
+    def revisar_verificacion(self):
+        v = self.verificar
+        super().revisar_verificacion()
+        if v and time.time() >= v[0] and self.t.ocupada(v[2]) and not self.t.ocupada(v[1]):
+            self.registrar_jugada(v[1], v[2])           # la camara confirmo: se anota la jugada
+
+    # ---------------- reconocimiento ----------------
+    def equipo_propio(self):
+        vals = [x for x in self.t.color[6:8, :].flatten() if x]   # filas 2 y 1 (indices 6 y 7)
+        return max(set(vals), key=vals.count) if vals else None
+
+    def procesar(self, rect):
+        super().procesar(rect)
+        self.tipos = {}
+        eq = self.equipo_propio()
+        if eq is None or not self.clf.listo():
+            return
+        for row in range(8):
+            for col in range(8):
+                if self.t.estable[row, col] and self.t.color[row, col] == eq:
+                    tp, conf = self.clf.predecir(clasificador.recorte(rect, col, row, V.STEP))
+                    if tp:
+                        self.tipos[V.nombre_casilla(col, row)] = (tp, conf)
+
+    def entrenar(self, rect):
+        eq = self.equipo_propio()
+        muestras = []
+        for fila in (1, 2):
+            for col in "ABCDEFGH":
+                n = f"{col}{fila}"
+                if self.t.ocupada(n) and self.t.color[V.indices(n)[1], V.indices(n)[0]] == eq:
+                    c, r = V.indices(n)
+                    muestras.append((clasificador.recorte(rect, c, r, V.STEP), clasificador.tipo_inicial(n)))
+        if len(muestras) != 16:
+            self.msg(f"Hay {len(muestras)} piezas de tu equipo en filas 1-2 (deben ser 16). No se entreno.", V.ROJO, 8)
+            return
+        self.clf.agregar_lote(muestras)
+        self.msg("Entrenado con la posicion inicial (16 piezas). Repite moviendo un poco las tablitas.", V.VERDE, 8)
     # ---------------- acciones ----------------
     def jugar(self):
         ok, texto, color, limpiar = self.estado_jugada()
@@ -171,6 +330,13 @@ class Juego(V.App):
             if c == "l":
                 self.limpiar()
                 return True
+            if c == "p":
+                self.entrenar(self.rect_clasif(self.t.rectificar(frame)))
+                return True
+            if c == "h":
+                self.calib_top = []
+                self.msg("Clic en el CENTRO del sticker de A1, H1, H8 y A8 (en ese orden)", V.AMARILLO, 30)
+                return True
         return super().teclado(key, frame)
 
     # ---------------- dibujo ----------------
@@ -196,6 +362,15 @@ class Juego(V.App):
                     cv2.rectangle(tab, (c * V.STEP + 2, r * V.STEP + 2),
                                   ((c + 1) * V.STEP - 2, (r + 1) * V.STEP - 2), color, 4)
                     V.texto(tab, rotulo, (c * V.STEP + 6, (r + 1) * V.STEP - 8), 0.4, color, 1)
+            for n in self.destinos:
+                c, r = V.indices(n)
+                cv2.circle(tab, (c * V.STEP + V.STEP // 2, r * V.STEP + V.STEP // 2), 10, V.VERDE, -1)
+            for n, (tp, conf) in self.tipos.items():
+                c, r = V.indices(n)
+                esp = self.logico.piece_at(chess.parse_square(n.lower()))
+                ok_tipo = esp is not None and esp.symbol().upper() == tp
+                V.texto(tab, tp, (c * V.STEP + 6, r * V.STEP + 20), 0.6, V.VERDE if ok_tipo else V.ROJO, 2)
+                
             if self.congelado():
                 V.texto(tab, "ROBOT MOVIENDO - lectura congelada", (V.BOARD_PIXELS // 2 - 160, 20), 0.6, V.ROJO, 2)
             elif t.ocluido:
@@ -213,6 +388,8 @@ class Juego(V.App):
         for linea in textwrap.wrap(texto, 34)[:3]:
             V.texto(panel, linea, (x0, y), 0.55, color, 1)
             y += 24
+        if self.sel_o in self.tipos:
+            V.texto(panel, f"Pieza vista: {clasificador.NOMBRES[self.tipos[self.sel_o][0]]}", (x0, 316), 0.55, V.CIAN, 1)
         V.texto(panel, "ROBOT: MOVIENDO" if self.brazo.ocupado else "ROBOT: listo", (x0, 340), 0.5,
                 V.NARANJA if self.brazo.ocupado else V.VERDE, 1)
         if t.H is None or t.fondo_rect is None:
@@ -243,6 +420,30 @@ class Juego(V.App):
         return np.hstack([tab, panel])
 
 
+#metodos nuevos
+    def rect_clasif(self, rect):
+        """Vista rectificada a la altura de los stickers (si se calibro), si no la normal."""
+        if self.H_top is None or self.frame is None:
+            return rect
+        return cv2.warpPerspective(self.frame, self.H_top, (V.BOARD_PIXELS, V.BOARD_PIXELS))
+
+    def clic_camara(self, event, x, y, flags, param):
+        if self.calib_top is None:
+            return super().clic_camara(event, x, y, flags, param)
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        self.calib_top.append((x, y))
+        if len(self.calib_top) < 4:
+            self.msg(f"Sticker {len(self.calib_top)}/4 guardado", V.AMARILLO, 30)
+            return
+        s = V.STEP
+        dst = np.float32([[0.5 * s, 7.5 * s], [7.5 * s, 7.5 * s], [7.5 * s, 0.5 * s], [0.5 * s, 0.5 * s]])
+        self.H_top = cv2.getPerspectiveTransform(np.float32(self.calib_top), dst)
+        self.calib_top = None
+        with open(ARCHIVO_TOP, "w") as f:
+            json.dump(self.H_top.tolist(), f)
+        self.msg("Calibracion de altura guardada", V.VERDE, 8)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--camara", type=int, default=V.CAMERA_INDEX)
@@ -259,12 +460,10 @@ def main():
         print("ERROR:", e)
         return
     if args.puerto:
-        if not robot.confirmar_encendido():
+        if not robot.confirmar_encendido("de RETIRADA (donde lo dejaste, fuera del encuadre de la camara)"):
             return
         try:
-            brazo.activar()
-            print("Retirando el brazo fuera del encuadre de la camara...")
-            brazo.retirar()
+            brazo.activar(desde=robot.pose_retirada())
         except (RuntimeError, TimeoutError) as e:
             print("ERROR:", e)
             return
@@ -272,7 +471,10 @@ def main():
     cap = V.abrir_camara(args.camara)
     if cap is None:
         print("Error: no se pudo abrir la camara", args.camara, "(prueba:  python juego.py --listar)")
+    for _ in range(40):          # deja que la camara ajuste exposicion y balance antes de leer el tablero
+        cap.read()
         return
+    
 
     app = Juego(brazo)
     app.libre_desde = time.time() + 1.5               # espera a que el brazo termine de retirarse
@@ -313,3 +515,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    print("inicio main")
