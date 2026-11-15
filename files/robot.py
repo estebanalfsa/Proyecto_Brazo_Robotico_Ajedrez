@@ -46,9 +46,9 @@ PASOS_VERTICALES = 3           # la bajada/subida se divide en estos pasos
 LEVANTE_TRASLADO = 12   # grados de hombro que se levanta el brazo al ir de una casilla a otra
 PAUSA_PINZA_S = 0.8            # espera tras abrir/cerrar
 # Grados EXTRA que se cierra la pinza mas alla del angulo en que TOCO la pieza al ensenarla.
-# Sin esto la sujeta sin fuerza y se le cae. Si resbala: subelo (14, 16...). Si el servo de la
-# pinza se calienta o zumba demasiado: bajalo (8, 10...).
-APRIETE_PINZA = 12
+# Sin esto la sujeta sin fuerza y se le cae. Si resbala: subelo (21, 25...). Si el servo de la
+# pinza se calienta o zumba demasiado: bajalo (12, 8...).
+APRIETE_PINZA = 19
 
 # Valores por defecto (en modo poses ensenadas se reemplazan por los del archivo,
 # que a su vez salen del firmware: asi la tabla vive en UN solo sitio, el .ino).
